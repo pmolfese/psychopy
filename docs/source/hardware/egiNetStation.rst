@@ -1,118 +1,346 @@
 .. _egi:
 
 Sending triggers via EGI NetStation
-=================================================
+===================================
 
-Communicating via EGI NetStation is very similar to communicating via a serial port, in that you'll need to add some code components into your experiment. 
+The `egi-pynetstation <https://egi-pynetstation.readthedocs.io/en/latest/>`_
+package sends Experimental Control Interface (ECI) commands and timestamped
+event markers from |PsychoPy| to EGI Net Station or Amp Server Pro. It is
+designed for experiments that need to mark a display refresh without making
+that refresh wait for a network round trip.
 
-The egi-pynetstation package allows communication using an NTP protocol. It is important to first verify your hardware setup. The code is compatible with EGI (also known as Philips EGI and most recently MagStimEGI) amplifiers 300 and 400 series. 
-While 400 series amplifiers serve as their own NTP server so are able to work with newer macOS versions (10.14.x as of April 2023).  If you are using a 300-series amplifier you must be using macOS 10.12. 
-This is because EGI has configured its own NTP server for use with 300-series amps; users who wish to alter this configuration with a 300-series amp should continue to use PsychoPy2's EGI package or
-investigate ports of the old package to Python3.
+.. warning::
 
-The old EGI "pynetstation" package uses a "polling" method of asking the EGI system what time it is before sending events. While generally accurate, delays in drawing to the screen can cause (usually minor) inconsistencies in timing. 
-This pakcage's implementation of NTP timing should be superior to the older method.
+    **egi-pynetstation 2.0 is a breaking release.** Code written for version
+    1.x, or for the older ``egi``/``pynetstation`` API, should not be expected
+    to work unchanged with version 2.0 or later.
 
-Step one: Verify your Amplifier and NTP server are active
--------------------------------------------------------------
+    In 2.0, ``send_event()`` is non-blocking by default, automatic drift
+    sampling runs in the background, and a recording uses one fixed ECI clock
+    synchronization. Do not carry forward old code that polls Net Station for
+    every event, repeatedly calls ``resync()``, or expects ``send_event()`` to
+    return an immediate response. Use the 2.0 pattern shown on this page.
 
-Users of 300 series amplifiers should open a terminal and run the following command:  ``sntp -d localhost``
+Default in 2.0: background drift refresh
+----------------------------------------
 
-Users of 400 series amplifiers may input the IP of your amplifier (usually 10.10.10.51) in the command above or open the webpage associated with the amplifier on the EGI laptop/desktop. 
+The recommended setup is also the simplest one. Calling ``connect()`` with an
+NTP server enables drift correction and starts the background sampling thread;
+there is no refresh or sampling call to add to your trial loop.
+
+.. code-block:: python
+
+    from egi_pynetstation import NetStation
+
+    eci_client = NetStation('10.10.10.42', 55513)
+    eci_client.connect(ntp_ip='10.10.10.51')
+    eci_client.begin_rec()
+
+Version 2.0 uses two package-owned background workers:
+
+* A **drift sampler** periodically queries the amplifier or Net Station NTP
+  server and updates the clock model. The thread starts during ``connect()``
+  and begins collecting usable samples after ``begin_rec()`` establishes the
+  recording's timestamp epoch.
+* An **event sender** writes queued markers to the ECI socket. ``send_event()``
+  captures the timestamp on the calling thread and returns immediately, so it
+  is safe to schedule with ``win.callOnFlip()``.
+
+The NTP refresh does **not** send another ECI ``NTPClockSync`` command, reset
+the event epoch, or create an event marker. One ECI synchronization at
+``begin_rec()`` establishes the epoch; background NTP queries measure and
+correct the gradual drift after that.
+
+.. important::
+
+    For the normal setup, leave ``auto_drift_background`` at its default of
+    ``True``. Do not add ``sample_drift()``, ``sample_drift_if_due()``, or
+    repeated ``resync()`` calls to the trial loop. Manual sampling is an
+    advanced opt-in described near the end of this page.
+
+Step one: verify the EGI network and NTP server
+-----------------------------------------------
+
+Confirm the addresses used by your acquisition setup before writing the
+experiment. A common 400-series configuration is:
+
+* Net Station computer and ECI server: ``10.10.10.42``
+* amplifier and NTP server: ``10.10.10.51``
+* ECI port configured in Net Station: ``55513``
+
+The exact addresses vary by laboratory. With some 300-series configurations,
+the Net Station computer supplies NTP instead of the amplifier. Check the
+vendor configuration or ask the person who maintains the acquisition system
+rather than assuming the example addresses are correct.
+
+On macOS or Linux, an NTP server can be checked from a terminal with, for
+example:
+
+.. code-block:: bash
+
+    sntp -d 10.10.10.51
+
+The amplifier's web interface may also show the amplifier and Net Station
+addresses.
 
 .. figure:: /images/egi-netstation.png
 
-Notice that this page gives information about your amplifier address (10.10.10.51) and the Net Station computer (10.10.10.42).
+    Example EGI network information showing an amplifier at ``10.10.10.51``
+    and Net Station at ``10.10.10.42``.
 
-Step two: Install EGI NetStation Python Library
--------------------------------------------------------------
+Step two: install egi-pynetstation 2.0
+--------------------------------------
 
-If you're using PsychoPy version 2022.1.3 or older, you'll need to install the EGI NetStation library using the Command Prompt in Windows. You will only need to do this once.
+Recent standalone |PsychoPy| versions can install the package from
+``Tools > Plugin/packages manager...``. Open the **Packages** tab, search for
+``egi-pynetstation``, and install version 2.0 or later. Restart |PsychoPy|
+after installation.
 
-* To access the Command Prompt, just type `Command Prompt `into the search bar next to your `Start Menu` icon and select it.
-* You now need to copy the file path to the file `python.exe` that is **inside** your PsychoPy folder (usually this is installed in ``C:\Program Files\PsychoPy``).
-* When you've found the PsychoPy folder, copy the file path and paste it into the Command Prompt, surrounded by quotation marks (" ").
-* Now, add ``\python.exe`` to the line, so that the line reads: ``"C:\Program Files\PsychoPy\python.exe"`` (or similar, depending on where your PsychoPy is saved).
-* Finally, add ``-m pip install egi-pynetstation`` to the line.
-* Your line should now look similar to this: ``"C:\Program Files\PsychoPy\python.exe" -m pip install egi-pynetstation`` as shown in the following screenshot:
+Alternatively, install it into the same Python environment that runs
+|PsychoPy|:
 
-.. figure:: /images/cmd.png
+.. code-block:: bash
 
-You're now ready to go!
+    python -m pip install "egi-pynetstation>=2"
 
-Step three: Add code components into your Builder experiment
--------------------------------------------------------------
-To communicate with your NetStation EEG hardware, you'll need to add in some Python code components to your experiment.
+For a standalone Windows installation, use the ``python.exe`` inside the
+|PsychoPy| installation, for example:
 
-* First, add in a code component to your `Instructions` routine (or something similar, at the start of your experiment):
+.. code-block:: bat
+
+    "C:\Program Files\PsychoPy\python.exe" -m pip install "egi-pynetstation>=2"
+
+egi-pynetstation 2.0 requires Python 3.9 or later. Verify that |PsychoPy| is
+loading the expected release before running a study:
+
+.. code-block:: python
+
+    from importlib.metadata import version
+    print(version('egi-pynetstation'))
+
+Check the stimulus computer's clocks once after installing the package and
+again after major Python, operating-system, or hardware changes:
+
+.. code-block:: bash
+
+    python -m egi_pynetstation.check_clocks
+
+This command reports the measured resolution of ``time.time()`` and
+``time.monotonic()``, sleep overshoot, and clock-difference jitter. On Windows,
+Python 3.13 or later is strongly recommended.
+
+Step three: add the connection to a Builder experiment
+------------------------------------------------------
+
+Add a Code Component to an instructions or setup Routine near the beginning
+of the experiment.
 
 .. figure:: /images/insertCode.png
 
-    Select the `Code component` from the `Custom` component drop-down
+    Select the Code Component from the Custom component drop-down.
 
-* In the `Begin Experiment` tab, copy and paste the following code which will import the relevant libraries and set up the communication with your NetStation - be sure to change the IP address of the NetStation so that it matches that of your own NetStation::
+In the **Begin Experiment** tab, import the package, connect, and start the
+recording. Change the addresses and port for your EGI network:
 
-    #Import Netstation library
-    from egi_pynetstation.NetStation import NetStation
+.. code-block:: python
 
-    #IP address of NetStation - CHANGE THIS TO MATCH THE IP ADDRESS OF YOUR NETSTATION
+    from egi_pynetstation import NetStation
+
+    # Computer running Net Station and the ECI port configured there.
     IP_ns = '10.10.10.42'
-
-    #IP address of amplifier (if using 300
-    #series, this is the same as the IP address of
-    #NetStation. If using newer series, the amplifier
-    #has its own IP address)
-    IP_amp = '10.10.10.51'
-
-    #Port configured for ECI in NetStation - CHANGE THIS IF NEEDED
     port_ns = 55513
 
-    #Start recording and send trigger to show this
-    eci_client = NetStation(IP_ns, port_ns)
-    eci_client.connect(ntp_ip = IP_amp)
-    eci_client.begin_rec()
-    eci_client.send_event(event_type = 'STRT', start = 0.0)
+    # Amplifier or Net Station host providing NTP.
+    IP_amp = '10.10.10.51'
 
-* Now, copy and paste the following code component to your trials routine in the `Begin Routine` tab, this just (re)sets a value at the start of the routine to indicate that no trigger has yet been sent::
+    eci_client = NetStation(IP_ns, port_ns)
+    eci_client.connect(ntp_ip=IP_amp)  # background drift refresh is automatic
+    eci_client.begin_rec()             # the one ECI clock sync for this run
+    eci_client.send_event(event_type='STRT', start=0.0)
+
+``begin_rec()`` should be called exactly once for a recording. Do not add a
+periodic ``resync()`` call: resetting the ECI epoch during a recording creates
+a timestamp discontinuity and is refused by the 2.0 API.
+
+Step four: mark the screen refresh
+----------------------------------
+
+In the **Begin Routine** tab of a Code Component in the trial Routine, reset a
+flag so that the marker is scheduled only once:
+
+.. code-block:: python
 
     triggerSent = False
 
-* Now, in the `Each Frame` tab of that same code component, add the following code to send a trigger OF NO MORE THAN FOUR CHARACTERS when your stimulus is presented. The :code:`.status` attribute here is checking whether the our stimulus has started, and if it has, PsychoPy sends the trigger to EGI NetStation. Note that most components in PsychoPy have the :code:`.status` attribute, so you could easily adapt this code to, for example, send a trigger when a response key is pressed::
+In the **Each Frame** tab, schedule the marker on the flip that first presents
+the stimulus. Change ``stimulus`` to the name of the relevant Builder
+Component:
 
-    #Send trigger to NetStation - Change 'stim' to
-    #a meaningful trigger for your experiment OF NO MORE THAN FOUR CHARACTERS. You can
-    #also set the trigger in a conditions file.
+.. code-block:: python
 
-    if stimulus.status == STARTED and not triggerSent: #If the stimulus component has started and the trigger has not yet been sent. Change 'stimulus' to match the name of the component you want the trigger to be sent at the same time as
-        win.callOnFlip(eci_client.send_event, event_type = 'stim', label='stim') #Send the trigger, synced to the screen refresh
-        triggerSent = True #The trigger has now been sent, so we set this to true to avoid a trigger being sent on each frame
+    if stimulus.status == STARTED and not triggerSent:
+        win.callOnFlip(
+            eci_client.send_event,
+            event_type='stim',
+            label='stimulus',
+        )
+        triggerSent = True
 
-* Finally, in a routine at the end of your experiment (the `Thanks for participating` screen for example) copy and paste the following::
+The event is timestamped inside the flip callback, before the network write.
+The background event sender then transmits it without holding up the following
+frame.
 
-    #Stop recording and disconnect
-    eci_client.end_rec()
-    eci_client.disconnect()
+.. note::
 
+    ``event_type`` must be **exactly four ASCII characters**, not merely four
+    or fewer. Keys in an optional ``data`` dictionary must also be exactly
+    four characters. For example:
 
-Step four: Test your triggers
--------------------------------------------------------------
+    .. code-block:: python
 
-* To check that everything works, we recommend that you set up a very basic experiment that looks similar to this:
+        win.callOnFlip(
+            eci_client.send_event,
+            event_type='stim',
+            label='target onset',
+            data={'trl_': trials.thisN, 'cond': 'target'},
+        )
+
+Call ``send_event()`` directly for an event that is not tied to a visual
+refresh, such as a response:
+
+.. code-block:: python
+
+    eci_client.send_event(event_type='resp', desc=f'key={key_resp.keys}')
+
+Both calls are non-blocking. The difference is the moment being marked: the
+flip callback marks the display refresh, while a direct call marks that line
+of experiment code.
+
+Step five: stop cleanly and inspect the session
+-----------------------------------------------
+
+In the **End Experiment** tab of a Code Component, stop the recording and
+disconnect:
+
+.. code-block:: python
+
+    eci_client.end_rec()       # flushes queued events before stopping
+
+    summary = eci_client.session_summary()
+    if not summary['ok']:
+        print('EGI session warning:', summary)
+
+    eci_client.disconnect()    # stops both background workers
+
+``end_rec()`` and ``disconnect()`` both flush queued markers. Keep the
+explicit calls so that a normal experiment shutdown is orderly and any error
+can be reported immediately.
+
+Optional advanced features
+--------------------------
+
+Most experiments should stop reading here and use the defaults above. The
+following controls are for diagnostics or experiments with a specific reason
+to take over part of the timing machinery.
+
+Manual drift sampling
+^^^^^^^^^^^^^^^^^^^^^
+
+To guarantee that NTP queries occur only during known quiet periods, disable
+the background sampler explicitly:
+
+.. code-block:: python
+
+    eci_client.connect(
+        ntp_ip=IP_amp,
+        auto_drift_background=False,
+        auto_drift_interval=15.0,
+        auto_drift_min_pause=0.35,
+    )
+
+Then call ``sample_drift_if_due()`` during an inter-trial interval or other
+safe pause:
+
+.. code-block:: python
+
+    eci_client.sample_drift_if_due(available_pause=iti_remaining)
+
+.. warning::
+
+    After setting ``auto_drift_background=False``, the experiment is
+    responsible for sampling. If it never calls ``sample_drift_if_due()`` or
+    ``sample_drift()``, the drift model receives no data and correction never
+    engages. Never call either sampling method from ``win.callOnFlip()``;
+    an NTP sample performs several network queries and blocks the calling
+    thread.
+
+Synchronous event responses
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``send_event()`` returns ``None`` by default because transmission happens on
+the background worker. A diagnostic tool that truly needs the amplifier's
+response can opt into a blocking call:
+
+.. code-block:: python
+
+    response = eci_client.send_event(event_type='test', wait=True)
+
+Do not use ``wait=True`` inside ``win.callOnFlip()`` or a timing-sensitive
+frame loop.
+
+Error logging and runtime diagnostics
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Pass an error-log path when constructing the client to retain structured
+JSON-lines diagnostics:
+
+.. code-block:: python
+
+    eci_client = NetStation(
+        IP_ns,
+        port_ns,
+        error_log='data/egi_errors.jsonl',
+    )
+
+Useful runtime checks include:
+
+.. code-block:: python
+
+    print(eci_client.drift_estimate())
+    print(eci_client.clock_state())
+    print(eci_client.session_summary())
+    print(eci_client.event_errors())  # asynchronous send failures
+    print(eci_client.eci_errors())    # rejected or malformed ECI responses
+
+Use these between trials or at the end of a run, not inside a flip callback.
+``flush_events()`` is also available if an experiment needs an explicit
+mid-run synchronization point.
+
+Testing the integration
+-----------------------
+
+Before using the integration in a real study:
+
+* Build a short experiment with only a few visual markers.
+* Confirm that the expected four-character event codes appear in Net Station.
+* Check ``session_summary()``, ``event_errors()``, and ``eci_errors()``.
+* Validate stimulus-to-marker timing with a photodiode or photocell.
+* Run the clock diagnostic on the actual stimulus computer, not on a general
+  development machine or virtual machine.
 
 .. figure:: /images/serialExp.png
 
+    A small test experiment is easier to diagnose than the full study.
 
+Getting help
+------------
 
-* Turn on your EEG recording device and start recording as you would in your actual experiment, and just check that you see triggers coming through.
-* It's a good idea at this point to also check the timing of your stimulus presentation and your triggers using, for example, a photodiode for visual stimuli.
-* Doing these checks with a very basic experiment just means that you don't accidentally change something on your real experiment file that you don't want to, and also means you don't have to disable components or sit through lots of instructions etc!
+For problems with the |PsychoPy| experiment, post details on the
+`PsychoPy Forum <https://discourse.psychopy.org/>`_. Include the operating
+system, Python and |PsychoPy| versions, egi-pynetstation version, amplifier
+series, and any output from ``check_clocks`` or ``session_summary()``.
 
-
-If there is a problem - We want to know!
--------------------------------------------------------------
-If you have followed the steps above and are having an issue with triggers, please post details of this on the `PsychoPy Forum <https://discourse.psychopy.org/>`_.
-
-Further documentation can be found on the `egi-pynetstation RTD <https://egi-pynetstation.readthedocs.io/en/latest/>`_ as well as their
-`github project <https://github.com/nimh-sfim/egi-pynetstation>`_ .
-
-We are constantly looking to update our documentation so that it's easy for you to use PsychoPy in the way that you want to. Posting in our forum allows us to see what issues users are having, offer solutions, and to update our documentation to hopefully prevent those issues from occurring again!
+For package behavior and the complete drift-model reference, see the
+`egi-pynetstation documentation
+<https://egi-pynetstation.readthedocs.io/en/latest/>`_ and
+`GitHub project <https://github.com/nimh-sfim/egi-pynetstation>`_.
